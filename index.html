@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HLB/Citrus Greening Disease Survey — Tiaong, Quezon</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: Arial, sans-serif; background: #f4f4f0; }
+#header { background:#1B5E20; color:#fff; padding:12px 20px; }
+#header h1 { font-size:16px; font-weight:500; }
+#header p { font-size:12px; opacity:0.8; margin-top:2px; }
+#map { width:100%; height: calc(100vh - 130px); }
+#panel { padding:10px 20px; background:#fff; border-top:2px solid #e0e0e0; font-size:13px; color:#555; min-height:60px; display:flex; align-items:center; flex-wrap:wrap; gap:16px; }
+#legend { position:absolute; bottom:40px; right:10px; background:rgba(255,255,255,0.95); padding:10px 12px; border-radius:8px; border:1px solid #ddd; font-size:11px; z-index:1000; }
+#legend h4 { font-size:11px; font-weight:600; color:#333; margin-bottom:6px; }
+.leg-row { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+.leg-box { width:16px; height:12px; border-radius:2px; }
+#tooltip { position:fixed; display:none; background:rgba(20,20,20,0.92); color:#fff; padding:9px 13px; border-radius:7px; font-size:12px; pointer-events:none; z-index:2000; max-width:220px; line-height:1.5; box-shadow:0 2px 8px rgba(0,0,0,0.35); }
+#tooltip .tt-name { font-size:13px; font-weight:700; margin-bottom:3px; }
+#tooltip .tt-pct { font-size:18px; font-weight:700; }
+#tooltip .tt-row { font-size:11px; opacity:0.85; margin-top:2px; }
+#tooltip .tt-unsurveyed { font-size:12px; opacity:0.75; font-style:italic; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>HLB / Citrus Greening Disease — PCR Survey Results</h1>
+  <p>Tiaong, Quezon &nbsp;|&nbsp; February – April 2025 &nbsp;|&nbsp; NITL-BIOTECH UPLB</p>
+</div>
+<div style="position:relative;">
+<div id="map"></div>
+<div id="legend">
+  <div style="font-size:11px;font-weight:700;color:#333;margin-bottom:7px;letter-spacing:0.3px;">HLB Infection Rate</div>
+  <div class="leg-row"><div class="leg-box" style="background:#A32D2D;"></div> Critical (100%)</div>
+  <div class="leg-row"><div class="leg-box" style="background:#D85A30;"></div> Severe (80–99%)</div>
+  <div class="leg-row"><div class="leg-box" style="background:#BA7517;"></div> High (60–79%)</div>
+  <div class="leg-row"><div class="leg-box" style="background:#E8A84A;"></div> Moderate (40–59%)</div>
+  <div class="leg-row"><div class="leg-box" style="background:#F5D78E;"></div> Low (&lt;40%)</div>
+  <div class="leg-row"><div class="leg-box" style="background:#C8E6C9; border:1px solid #388E3C;"></div> Negative (0%)</div>
+  <div class="leg-row"><div class="leg-box" style="background:#7A7873; border:1px solid #5F5E5A;"></div> Not surveyed</div>
+</div>
+</div>
+<div id="panel">Click any barangay to see survey details.</div>
+<div id="tooltip"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+<script>
+const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSn4vkylgJQKNP6TX_GeiavTVJSnY0QYa4Wrj_ei_qFNJb6Io3w8r8OSN-9457Dw_uObcHpcFCC8k6K/pub?gid=1183542419&single=true&output=csv";
+
+const RISK_FILL   = { CRITICAL:"#A32D2D", SEVERE:"#D85A30", HIGH:"#BA7517", MODERATE:"#E8A84A", LOW:"#F5D78E", NEGATIVE:"#C8E6C9" };
+const RISK_BORDER = { CRITICAL:"#791F1F", SEVERE:"#993C1D", HIGH:"#854F0B", MODERATE:"#BA7517", LOW:"#BA7517", NEGATIVE:"#388E3C" };
+const RISK_TEXT   = { CRITICAL:"#791F1F", SEVERE:"#993C1D", HIGH:"#854F0B", MODERATE:"#9A6A1A", LOW:"#9A6A1A", NEGATIVE:"#1B5E20" };
+const RISK_TT     = { CRITICAL:"#FF8A80", SEVERE:"#FFAB76", HIGH:"#FFD180", MODERATE:"#FFE57F", LOW:"#FFF9C4", NEGATIVE:"#C8E6C9" };
+
+function parseCSV(text) {
+  const rows = [];
+  const lines = text.trim().split("\n");
+  const headers = splitCSVRow(lines[0]);
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const vals = splitCSVRow(lines[i]);
+    const row = {};
+    headers.forEach((h, idx) => row[h.trim()] = (vals[idx] || "").trim());
+    rows.push(row);
+  }
+  return rows;
+}
+
+function splitCSVRow(line) {
+  const result = [];
+  let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { result.push(cur); cur = ""; }
+    else { cur += ch; }
+  }
+  result.push(cur);
+  return result;
+}
+
+// Strip province from municipality name e.g. "Rosario, Batangas" → "Rosario"
+function muniFileName(name) {
+  return name.split(",")[0].trim();
+}
+
+function getRisk(pct) {
+  if (pct >= 100) return "CRITICAL";
+  if (pct >= 80)  return "SEVERE";
+  if (pct >= 60)  return "HIGH";
+  if (pct >= 40)  return "MODERATE";
+  if (pct > 0)    return "LOW";
+  return "NEGATIVE";
+}
+
+function buildHLB(rows) {
+  // First pass: aggregate multiple rows per barangay
+  const aggregated = {};
+  rows.forEach(r => {
+    const key = r.Barangay;
+    if (!key) return;
+    if (!aggregated[key]) {
+      aggregated[key] = {
+        municipality: r.Municipality || "",
+        pos: 0, total: 0,
+        crops: [], farms: [], notes: []
+      };
+    }
+    const a = aggregated[key];
+    a.pos   += parseInt(r["HLB Infected"]) || 0;
+    a.total += parseInt(r.Total) || 0;
+    if (r.Crop  && !a.crops.includes(r.Crop))   a.crops.push(r.Crop);
+    if (r.Farms && !a.farms.includes(r.Farms))   a.farms.push(r.Farms);
+    if (r.Note  && !a.notes.includes(r.Note))    a.notes.push(r.Note);
+  });
+
+  // Second pass: compute pct, risk, colors
+  const hlb = {};
+  Object.entries(aggregated).forEach(([barangay, a]) => {
+    const pct  = a.total > 0 ? parseFloat(((a.pos / a.total) * 100).toFixed(2)) : 0;
+    const risk = getRisk(pct);
+    hlb[barangay] = {
+      municipality: a.municipality,
+      muniFile: muniFileName(a.municipality),
+      pos: a.pos, total: a.total, pct, risk,
+      crop:  a.crops.join(", "),
+      farms: a.farms.filter(Boolean).join("; "),
+      note:  a.notes.filter(Boolean).join(" "),
+      fill:   RISK_FILL[risk]   || "#E8A84A",
+      border: RISK_BORDER[risk] || "#BA7517"
+    };
+  });
+  return hlb;
+}
+
+function styleLayer(name, HLB) {
+  const info = HLB[name];
+  return info
+    ? { color: info.border, weight: 2, fillColor: info.fill, fillOpacity: 0.72, opacity: 1 }
+    : { color: "#5F5E5A", weight: 0.8, fillColor: "#7A7873", fillOpacity: 0.5, opacity: 0.9 };
+}
+
+const GITHUB_BASE = "https://raw.githubusercontent.com/cakalaw/hlb-survey-map/main/";
+
+function initMap(HLB, geojsonFeatures) {
+  const map = L.map("map").setView([13.932, 121.345], 12);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "\u00a9 OpenStreetMap contributors", maxZoom: 19
+  }).addTo(map);
+
+  const panel = document.getElementById("panel");
+  let activeLayer = null;
+
+  const geoLayer = L.geoJSON({ type:"FeatureCollection", features: geojsonFeatures }, {
+    style: f => styleLayer(f.properties.name, HLB),
+    onEachFeature: (f, layer) => {
+      const name = f.properties.name;
+      const info = HLB[name];
+
+      layer.on("mouseover", function(e) {
+        if (activeLayer !== this) {
+          if (info) this.setStyle({ fillOpacity: 0.9, weight: 2.5 });
+          else this.setStyle({ fillOpacity: 0.65, weight: 1.2 });
+        }
+        const tt = document.getElementById("tooltip");
+        if (info) {
+          const pct = info.pct % 1 === 0 ? info.pct + "%" : info.pct.toFixed(2) + "%";
+          const rc = RISK_TT[info.risk] || "#fff";
+          tt.innerHTML = `
+            <div class="tt-name">${name}</div>
+            <div class="tt-pct" style="color:${rc};">${pct} positive</div>
+            <div class="tt-row">${info.pos} of ${info.total} pooled samples | ${info.crop}</div>
+            <div class="tt-row" style="margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.15);">${info.farms}</div>
+            <div class="tt-row" style="opacity:0.6;margin-top:3px;font-style:italic;">Click for full details</div>`;
+        } else {
+          tt.innerHTML = `<div class="tt-name">${name}</div><div class="tt-unsurveyed">Not surveyed</div>`;
+        }
+        tt.style.display = "block";
+        const x = e.originalEvent.clientX, y = e.originalEvent.clientY;
+        tt.style.left = (x + 14) + "px";
+        tt.style.top  = (y - 10) + "px";
+      });
+      layer.on("mousemove", function(e) {
+        const tt = document.getElementById("tooltip");
+        const x = e.originalEvent.clientX, y = e.originalEvent.clientY;
+        const tw = tt.offsetWidth, th = tt.offsetHeight;
+        const wx = window.innerWidth, wy = window.innerHeight;
+        tt.style.left = (x + 14 + tw > wx ? x - tw - 14 : x + 14) + "px";
+        tt.style.top  = (y - 10 + th > wy ? y - th + 10 : y - 10) + "px";
+      });
+      layer.on("mouseout", function() {
+        if (activeLayer !== this) this.setStyle(styleLayer(name, HLB));
+        document.getElementById("tooltip").style.display = "none";
+      });
+      layer.on("click", function() {
+        if (activeLayer && activeLayer !== this) activeLayer.setStyle(styleLayer(activeLayer.feature.properties.name, HLB));
+        activeLayer = this;
+        this.setStyle({ color: "#fff", weight: 3, fillOpacity: 0.92 });
+        showPanel(name, info);
+      });
+
+      if (info) {
+        const center = layer.getBounds().getCenter();
+        const pct = info.pct % 1 === 0 ? info.pct + "%" : info.pct.toFixed(2) + "%";
+        L.marker(center, {
+          icon: L.divIcon({
+            className: "",
+            html: `<div style="text-align:center;pointer-events:none;white-space:nowrap;">
+              <div style="font-size:13px;font-weight:700;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,0.95),0 0 6px rgba(0,0,0,0.7);">${pct}</div>
+            </div>`,
+            iconSize: [70, 18], iconAnchor: [35, 9]
+          }),
+          interactive: false
+        }).addTo(map);
+      }
+    }
+  }).addTo(map);
+
+  // Fit map to loaded boundaries
+  if (geojsonFeatures.length > 0) map.fitBounds(geoLayer.getBounds(), { padding: [20, 20] });
+
+  // Draw distinct municipality outline per municipality group
+  const muniGroups = {};
+  geojsonFeatures.forEach(f => {
+    const m = f.properties.municipality || "unknown";
+    if (!muniGroups[m]) muniGroups[m] = [];
+    muniGroups[m].push(f);
+  });
+  Object.values(muniGroups).forEach(features => {
+    try {
+      let boundary = features[0];
+      for (let i = 1; i < features.length; i++) boundary = turf.union(boundary, features[i]);
+      // Outer glow effect - wide faint border underneath
+      L.geoJSON(boundary, {
+        style: { color: "#FFD700", weight: 8, fillOpacity: 0, opacity: 0.25, lineCap:"round", lineJoin:"round" },
+        interactive: false
+      }).addTo(map);
+      // Sharp municipality border on top
+      L.geoJSON(boundary, {
+        style: { color: "#FFD700", weight: 3, fillOpacity: 0, opacity: 1, lineCap:"round", lineJoin:"round", dashArray: null },
+        interactive: false
+      }).addTo(map);
+    } catch(e) { console.warn("Boundary dissolve failed:", e); }
+  });
+
+  function showPanel(name, info) {
+    if (!info) {
+      panel.innerHTML = `<strong>${name}</strong> &mdash; not surveyed in the 2025 HLB PCR study.`;
+      return;
+    }
+    const rc = RISK_TEXT[info.risk] || "#333";
+    const pct = info.pct % 1 === 0 ? info.pct : info.pct.toFixed(2);
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="width:14px;height:14px;border-radius:3px;background:${info.fill};border:1px solid ${info.border};display:inline-block;"></span>
+        <strong style="font-size:14px;color:#222;">${name}</strong>
+        <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;background:${rc}22;color:${rc};border:1px solid ${rc}44;">${info.risk}</span>
+        <span style="font-size:11px;color:#888;">${info.municipality}</span>
+      </div>
+      <div><span style="font-size:15px;font-weight:700;color:${rc};">${info.pos}/${info.total} pooled samples = ${pct}%</span> <span style="font-size:11px;color:#888;">(1 sample = 3 pooled trees)</span></div>
+      <div style="color:#555;"><strong>Crop:</strong> ${info.crop} &nbsp;|&nbsp; <strong>Farms:</strong> ${info.farms}</div>
+      <div style="color:${rc};font-style:italic;">${info.note}</div>`;
+  }
+}
+
+// --- Load data and start ---
+const panel = document.getElementById("panel");
+panel.innerHTML = '<span style="color:#888;font-style:italic;">Loading survey data...</span>';
+
+fetch(SHEET_URL)
+  .then(r => { if (!r.ok) throw new Error("Sheet fetch failed"); return r.text(); })
+  .then(csv => {
+    const rows = parseCSV(csv);
+    const HLB = buildHLB(rows);
+
+    // Get unique municipality file names from sheet
+    const municipalities = [...new Set(rows.map(r => r.Municipality).filter(Boolean))];
+    const muniFiles = [...new Set(municipalities.map(m => muniFileName(m)))];
+    panel.innerHTML = `<span style="color:#888;font-style:italic;">Loading boundaries for: ${municipalities.join(", ")}...</span>`;
+
+    // Fetch GeoJSON for each municipality from GitHub
+    const geojsonPromises = muniFiles.map(muni =>
+      fetch(GITHUB_BASE + muni + ".geojson")
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (!data) { console.warn("No GeoJSON found for:", muni); return []; }
+          data.features.forEach(f => f.properties.municipality = muni);
+          return data.features;
+        })
+        .catch(() => { console.warn("Failed to load:", muni); return []; })
+    );
+
+    return Promise.all(geojsonPromises).then(results => {
+      const allFeatures = results.flat();
+      initMap(HLB, allFeatures);
+      panel.innerHTML = `Click any barangay to see survey details. <span style="font-size:11px;color:#aaa;margin-left:8px;">Loaded: ${municipalities.join(", ")} ✓</span>`;
+    });
+  })
+  .catch(err => {
+    console.error("Failed to load:", err);
+    panel.innerHTML = '<span style="color:#A32D2D;">Failed to load data. Check your internet connection.</span>';
+  });
+</script>
+</body>
+</html>
